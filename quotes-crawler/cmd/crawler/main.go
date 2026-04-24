@@ -64,8 +64,8 @@ func main() {
 	log.Println("SHA256: ", dedup.SHA256(allQuotes[0].Text))
 	log.Println("Normalized: ", dedup.Normalize(allQuotes[0].Text))
 
-	hash1 := dedup.Simhash(allQuotes[0].Text)
-	hash2 := dedup.Simhash(allQuotes[1].Text)
+	hash1 := dedup.Simhash(dedup.Normalize("To be or not to be"))
+	hash2 := dedup.Simhash(dedup.Normalize("To be or not to be!"))
 	distance := dedup.HammingDistance(hash1, hash2)
 	log.Println("Hamming Distance: ", distance)
 }
