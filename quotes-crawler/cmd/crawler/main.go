@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"quote-crawler/internal/db"
+	"quote-crawler/internal/dedup"
 	"quote-crawler/internal/fetcher"
 	"quote-crawler/internal/models"
 	"quote-crawler/internal/parser"
@@ -54,5 +55,17 @@ func main() {
 		allQuotes = append(allQuotes, quotes...)
 	}
 
-	log.Println(allQuotes)
+	//data, err := json.MarshalIndent(allQuotes, "", "  ")
+	//if err != nil {
+	//	log.Fatal("Could not marshal quotes: ", err)
+	//}
+	//log.Println(string(data))
+	log.Println("Simhash: ", dedup.Simhash(allQuotes[0].Text))
+	log.Println("SHA256: ", dedup.SHA256(allQuotes[0].Text))
+	log.Println("Normalized: ", dedup.Normalize(allQuotes[0].Text))
+
+	hash1 := dedup.Simhash(allQuotes[0].Text)
+	hash2 := dedup.Simhash(allQuotes[1].Text)
+	distance := dedup.HammingDistance(hash1, hash2)
+	log.Println("Hamming Distance: ", distance)
 }
