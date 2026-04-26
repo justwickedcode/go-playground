@@ -1,9 +1,10 @@
 package parser
 
 import (
+	"quotes-crawler/internal/dedup"
 	"strings"
 
-	"quote-crawler/internal/models"
+	"quotes-crawler/internal/models"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -19,7 +20,7 @@ func (p *ToscrapeParser) Parse(html string) ([]models.Quote, error) {
 	var quotes []models.Quote
 
 	doc.Find("div.quote").Each(func(i int, s *goquery.Selection) {
-		text := s.Find("span.text").Text()
+		text := dedup.StripQuoteChars(s.Find("span.text").Text())
 		author := s.Find("small.author").Text()
 
 		var tags []string

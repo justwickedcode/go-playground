@@ -13,9 +13,13 @@ import (
 // compiled once at package level
 var whitespaceRegex = regexp.MustCompile(`\s+`)
 
+func StripQuoteChars(text string) string {
+	return strings.Trim(text, "\"\u201c\u201d«»")
+}
+
 func Normalize(text string) string {
 	normalizedText := strings.TrimSpace(text)
-	normalizedText = strings.Trim(normalizedText, "\"\u201c\u201d«»")
+	normalizedText = StripQuoteChars(normalizedText)
 	normalizedText = whitespaceRegex.ReplaceAllString(normalizedText, " ")
 	normalizedText = strings.ToLower(normalizedText)
 	return normalizedText
@@ -25,7 +29,7 @@ func SHA256(text string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 }
 
-func Simhash(text string) uint64 {
+func Simhash(text string) int64 {
 	words := strings.Fields(text)
 
 	// one counter per bit position, int64 to allow negative votes
@@ -54,7 +58,7 @@ func Simhash(text string) uint64 {
 	}
 
 	// majority vote: if more +1s than -1s, bit is 1 in the fingerprint
-	var fingerprint uint64
+	var fingerprint int64
 	for bit := 0; bit < 64; bit++ {
 		if counter[bit] > 0 {
 			fingerprint |= 1 << bit

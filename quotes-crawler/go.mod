@@ -1,4 +1,4 @@
-module quote-crawler
+module quotes-crawler
 
 go 1.25.0
 
