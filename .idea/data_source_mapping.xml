@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourcePerFileMappings">
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/74620e9f-e901-46ec-a229-7173b9658235/console.sql" value="74620e9f-e901-46ec-a229-7173b9658235" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/74620e9f-e901-46ec-a229-7173b9658235/console_1.sql" value="74620e9f-e901-46ec-a229-7173b9658235" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/74620e9f-e901-46ec-a229-7173b9658235/console_2.sql" value="74620e9f-e901-46ec-a229-7173b9658235" />
+    <file url="file://$APPLICATION_CONFIG_DIR$/consoles/db/74620e9f-e901-46ec-a229-7173b9658235/console_3.sql" value="74620e9f-e901-46ec-a229-7173b9658235" />
+    <file url="file://$PROJECT_DIR$/quotes-crawler/internal/db/migrations/001_create_quotes.up.sql" value="74620e9f-e901-46ec-a229-7173b9658235" />
+  </component>
+</project>

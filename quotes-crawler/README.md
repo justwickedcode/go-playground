@@ -119,8 +119,8 @@ low      (weight 1) → slow or unreliable sources (Goodreads)
 ## TODO
 
 ### Phase 1 — Foundations
-- [ ] Move crawler loop from `main.go` → `internal/crawler/crawler.go`
-- [ ] Add rate limiting to `fetcher` (configurable delay per domain)
+- ✅ Move crawler loop from `main.go` → `internal/crawler/crawler.go`
+- ✅ Add rate limiting to `fetcher` (configurable delay per domain)
 - [ ] Replace hardcoded page loop with dynamic next-page detection
 
 ### Phase 2 — New Sources
