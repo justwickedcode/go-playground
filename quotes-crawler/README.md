@@ -143,4 +143,3 @@ low      (weight 1) → slow or unreliable sources (Goodreads)
 - [ ] Graceful shutdown (context cancellation)
 - [ ] Structured logging (slog or zap)
 - [ ] Metrics (crawl rate, save rate, error rate)
-- 

@@ -10,7 +10,13 @@ import (
 	"strings"
 )
 
-// compiled once at package level
+const (
+	NumBands               = 4
+	BandBits               = 16
+	HammingThreshold       = 3
+	bandMask         int64 = (1 << BandBits) - 1
+)
+
 var whitespaceRegex = regexp.MustCompile(`\s+`)
 
 func StripQuoteChars(text string) string {
@@ -18,11 +24,11 @@ func StripQuoteChars(text string) string {
 }
 
 func Normalize(text string) string {
-	normalizedText := strings.TrimSpace(text)
-	normalizedText = StripQuoteChars(normalizedText)
-	normalizedText = whitespaceRegex.ReplaceAllString(normalizedText, " ")
-	normalizedText = strings.ToLower(normalizedText)
-	return normalizedText
+	text = strings.TrimSpace(text)
+	text = StripQuoteChars(text)
+	text = whitespaceRegex.ReplaceAllString(text, " ")
+	text = strings.ToLower(text)
+	return text
 }
 
 func SHA256(text string) string {
@@ -31,23 +37,15 @@ func SHA256(text string) string {
 
 func Simhash(text string) int64 {
 	words := strings.Fields(text)
-
-	// one counter per bit position, int64 to allow negative votes
 	var counter [64]int64
 
-	// reuse the same hasher across words to avoid allocations
 	h := fnv.New64a()
 	for _, word := range words {
 		h.Reset()
-
-		// FNV never returns an error but we handle it for interface compliance
 		if _, err := io.WriteString(h, word); err != nil {
 			return 0
 		}
-
 		hash := h.Sum64()
-
-		// each word votes on every bit: +1 if bit is set, -1 if not
 		for bit := 0; bit < 64; bit++ {
 			if (hash>>bit)&1 == 1 {
 				counter[bit]++
@@ -57,17 +55,23 @@ func Simhash(text string) int64 {
 		}
 	}
 
-	// majority vote: if more +1s than -1s, bit is 1 in the fingerprint
 	var fingerprint int64
 	for bit := 0; bit < 64; bit++ {
 		if counter[bit] > 0 {
 			fingerprint |= 1 << bit
 		}
 	}
-
 	return fingerprint
 }
 
-func HammingDistance(a, b uint64) int {
-	return bits.OnesCount64(a ^ b)
+func ExtractBands(simhash int64) [NumBands]int64 {
+	var bands [NumBands]int64
+	for i := 0; i < NumBands; i++ {
+		bands[i] = (simhash >> (i * BandBits)) & bandMask
+	}
+	return bands
+}
+
+func HammingDistance(a, b int64) int {
+	return bits.OnesCount64(uint64(a ^ b))
 }
