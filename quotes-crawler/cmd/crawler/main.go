@@ -5,13 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
-	"strings"
-
 	"quotes-crawler/internal/db"
 	"quotes-crawler/internal/fetcher"
 	"quotes-crawler/internal/models"
 	"quotes-crawler/internal/parser"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
@@ -73,52 +71,6 @@ func main() {
 
 		allQuotes = append(allQuotes, quotes...)
 	}
-
-	// ---- dedup tests ----
-	log.Println("--- running dedup tests ---")
-
-	if len(allQuotes) > 0 {
-		first := allQuotes[0]
-
-		// exact duplicate: same quote verbatim
-		inserted, err := store.SaveQuote(ctx, first)
-		if err != nil {
-			log.Printf("exact dup test error: %v", err)
-		} else if !inserted {
-			log.Printf("PASS: exact duplicate correctly rejected (%q)", first.Text[:40])
-		} else {
-			log.Printf("FAIL: exact duplicate was inserted (%q)", first.Text[:40])
-		}
-
-		// near duplicate: same quote with minor text change
-		nearDup := first
-		nearDup.Text = strings.TrimRight(first.Text, ".") + "!"
-		inserted, err = store.SaveQuote(ctx, nearDup)
-		if err != nil {
-			log.Printf("near dup test error: %v", err)
-		} else if !inserted {
-			log.Printf("PASS: near-duplicate correctly rejected (%q)", nearDup.Text[:40])
-		} else {
-			log.Printf("FAIL: near-duplicate was inserted (%q)", nearDup.Text[:40])
-		}
-
-		// genuinely new quote
-		newQuote := models.Quote{
-			Text:   "This is a completely unique quote that does not exist in the database at all.",
-			Author: "Test Author",
-			Source: "test",
-		}
-		inserted, err = store.SaveQuote(ctx, newQuote)
-		if err != nil {
-			log.Printf("new quote test error: %v", err)
-		} else if inserted {
-			log.Println("PASS: new quote correctly inserted")
-		} else {
-			log.Println("FAIL: new quote was rejected!")
-		}
-	}
-
-	log.Println("--- dedup tests done ---")
 
 	// ---- save all ----
 	var saved, skipped, total int

@@ -1,7 +1,7 @@
 services:
   database:
     image: postgres:16
-    container_name: quotes-crawler-db
+    container_name: quotes-crawler
     restart: unless-stopped
 
     ports:

@@ -46,8 +46,8 @@ new quote
     ├─ SHA256 match? → exact duplicate → discard        ✅ implemented
     │   (ON CONFLICT DO NOTHING in SaveQuote)
     │
-    └─ Hamming distance < threshold? → near duplicate → discard   ⬜ pending Redis
-        (check against Redis simhash cache)
+    └─ Hamming distance < threshold? → near duplicate → discard   ✅ implemented
+        (LSH banding in Redis, Hamming check on candidates only)
 ```
 
 ### What's built
@@ -59,24 +59,54 @@ new quote
 | `dedup.SHA256` | ✅ Done | Exact duplicate fingerprint |
 | `dedup.Simhash` | ✅ Done | Near-duplicate fingerprint |
 | `dedup.HammingDistance` | ✅ Done | Bit distance between two simhashes |
+| `dedup.ExtractBands` | ✅ Done | LSH banding — splits simhash into 4 × 16-bit bands |
 | Exact dedup in `SaveQuote` | ✅ Done | `ON CONFLICT (sha256_hash) DO NOTHING` |
-| Near-dedup via Redis | ⬜ Pending | TODO in `SaveQuote`, blocked on Redis |
+| Near-dedup via Redis LSH | ✅ Done | Band lookup → candidate set → Hamming check |
+| `WarmSimhashCache` | ✅ Done | Loads all simhashes from Postgres into Redis on startup |
 
-### Redis simhash cache (planned)
+### Redis simhash cache
 
 ```
-on startup → WarmSimhashCache: load all simhashes from Postgres → Redis SET
-on insert  → check Hamming distance against Redis in memory (~0.1ms vs ~20ms Postgres)
-on save    → write to Postgres + add simhash to Redis SET
+on startup → WarmSimhashCache: load all simhashes from Postgres → Redis Sets (LSH bands)
+on insert  → check Hamming distance against Redis candidates only (~0.1ms vs ~20ms Postgres)
+on save    → write to Postgres + add simhash bands to Redis
 
 Redis restart → always re-warm from Postgres (source of truth)
 ```
 
 Memory cost: ~5-10MB for 100k quotes (simhash = int64 = 8 bytes per quote).
 
+### LSH Banding
+
+Instead of checking every stored simhash, the 64-bit simhash is split into 4 bands of 16 bits each. Similar quotes will share at least one band, so only candidates from matching buckets are Hamming-checked.
+
+```
+simhash (64 bits) → band0 | band1 | band2 | band3  (16 bits each)
+each band → Redis key: simhash:band:<n>:<value>
+new quote → lookup 4 keys → collect candidates → Hamming check only on candidates
+```
+
+At 10M quotes: ~152 Hamming checks per insert instead of 10M.
+
+## Tests
+
+| Package | Coverage | Notes |
+|---|---|---|
+| `internal/dedup` | 96.6% | All core functions covered |
+| `internal/parser` | 91.7% | Parser tested against fixture HTML |
+| `internal/db` | 64.2% | SaveQuote tested with testcontainers (Postgres + Redis) |
+
+Tests use [testcontainers-go](https://github.com/testcontainers/testcontainers-go) to spin up isolated Postgres and Redis containers — no manual setup needed.
+
+```bash
+go test ./...               # run all tests
+go test -v ./...            # verbose output
+go test -cover ./...        # with coverage
+```
+
 ## URL Frontier & Priority Queue
 
-Instead of hardcoded page loops, the crawler maintains a **URL frontier** — a priority queue of URLs waiting to be crawled. Pages are discovered dynamically during parsing and re-enqueued with a score.
+Instead of hardcoded page loops, the crawler will maintain a **URL frontier** — a priority queue of URLs waiting to be crawled. Pages are discovered dynamically during parsing and re-enqueued with a score.
 
 ```
 Seed URLs → [Redis Sorted Set] → Worker pulls lowest score URL → Fetch → Parse
@@ -106,7 +136,7 @@ score = source_base + (depth × depth_penalty) + (errors × error_penalty)
 |---|---|
 | `Sorted Set` — `frontier` | Priority queue (`ZADD` to push, `ZPOPMIN` to pull) |
 | `Set` — `visited` | Dedup visited URLs (`SADD`, `SISMEMBER`) |
-| `Set` — `simhash_cache` | Near-duplicate quote detection |
+| `Set` — `simhash:band:*` | Near-duplicate quote detection via LSH |
 
 ### Asynq weighted queues
 
@@ -121,6 +151,7 @@ low      (weight 1) → slow or unreliable sources (Goodreads)
 ### Phase 1 — Foundations
 - ✅ Move crawler loop from `main.go` → `internal/crawler/crawler.go`
 - ✅ Add rate limiting to `fetcher` (configurable delay per domain)
+- ✅ Write tests for `dedup`, `parser`, `db`
 - [ ] Replace hardcoded page loop with dynamic next-page detection
 
 ### Phase 2 — New Sources
@@ -134,8 +165,6 @@ low      (weight 1) → slow or unreliable sources (Goodreads)
 - [ ] Visited URL set to prevent re-crawling
 - [ ] URL scoring system (source base + depth + error rate)
 - [ ] Asynq workers with weighted queues (critical / default / low)
-- [ ] Redis simhash cache + `WarmSimhashCache` on startup
-- [ ] Near-dedup via Hamming distance check against Redis cache
 
 ### Phase 4 — Robustness
 - [ ] Per-domain error tracking + automatic backoff
@@ -143,3 +172,4 @@ low      (weight 1) → slow or unreliable sources (Goodreads)
 - [ ] Graceful shutdown (context cancellation)
 - [ ] Structured logging (slog or zap)
 - [ ] Metrics (crawl rate, save rate, error rate)
+
