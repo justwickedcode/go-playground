@@ -2,92 +2,170 @@
 
 ## What we did this session
 
-### Migrations
-- Switched fully to Goose for all migrations (dropped the old golang-migrate style file)
-- Migration 1: `create_quotes` — quotes table, unchanged
-- Migration 2: `create_url_frontier` — new table with `crawl_status` ENUM (`pending`, `in_progress`, `done`, `failed`), composite index on `(status, priority)`
+### New package: `internal/crawler`
+- Created `internal/crawler/crawler.go` with:
+    - `Crawler` struct holding `*db.Store`
+    - `New(store *db.Store) *Crawler` constructor
+    - `SeedFrontier(ctx)` — seeds the frontier on first run only
+    - `Run(ctx)` — main crawl loop
 
-### New package: `internal/scoring`
-- `scoring.go` — `CalculatePriority(source, depth, errorCount)`
-- Exported constants: `DepthPenalty = 0.5`, `ErrorPenalty = 3.0`, `DefaultSourceBase = 1000.0`
-- Source base scores: Quotable = 1.0, BrainyQuote = 5.0, Goodreads = 20.0
-- Unknown sources fall back to `DefaultSourceBase` (crawled last, no crash)
+### `SeedFrontier`
+- Checks `GetPendingURLs` first — if non-empty, returns early (idempotent)
+- Calculates priority via `scoring.CalculatePriority(source, 0, 0)` before building the struct
+- Calls `SaveURL` then `PushURL` for each seed — logs and continues on error
+- Current seed: BrainyQuote only (`https://www.brainyquote.com/topics/inspirational-quotes`)
+- Quotable API dropped — service is down and likely staying down
 
-### New model: `models.URLFrontier`
-- Fields match `url_frontier` table exactly
-- `LastCrawledAt` is `*time.Time` (nullable)
-- Naming follows Go conventions: `URL` not `Url`, `URLFrontier` not `UrlFrontier`
+### `Run` loop flow
+```
+WarmSimhashCache
+WarmFrontierCache
+SeedFrontier
+loop:
+  PopURL → if empty, sleep 5s and continue
+  MarkURLInProgress
+  Fetch
+  Parse (dispatched by source — switch statement, not yet implemented)
+  MarkURLDone or MarkURLFailed
+```
 
-### New storage functions in `internal/db`
-All methods on `*Store`, same pattern as `SaveQuote`:
+### `main.go` slimmed down
+- Removed old hardcoded toscrape loop
+- Now just: setup (Postgres, Redis, migrations) → `crawler.New(store)` → `crawler.Run(ctx)`
 
-| Function | What it does |
-|---|---|
-| `SaveURL(ctx, URLFrontier)` | Insert URL, `ON CONFLICT DO NOTHING`, returns `(bool, error)` |
-| `MarkURLDone(ctx, url)` | Sets `status=done`, `last_crawled_at=NOW()` |
-| `MarkURLFailed(ctx, url)` | Sets `status=failed`, `last_crawled_at=NOW()`, `error_count+1` |
-| `GetPendingURLs(ctx)` | Returns all `status=pending` rows ordered by priority |
-| `WarmFrontierCache(ctx)` | Loads pending URLs into Redis Sorted Set on startup |
-| `PushURL(ctx, url, priority)` | `ZADD frontier <priority> <url>` |
-| `PopURL(ctx)` | `ZPOPMIN frontier` — returns next URL to crawl |
+### `MarkURLInProgress` added to `internal/db/store.go`
+- Sets `status = 'in_progress'`, no `last_crawled_at` update
 
 ---
 
-## What's next (pick up here)
+## Current state
 
-### 1. Seed URLs — immediate next step
-On first run, the frontier is empty. Need a `SeedFrontier` function in `crawler.go` that:
-- Defines a hardcoded list of seed URLs per source (BrainyQuote homepage, Quotable API root, etc.)
-- Calls `SaveURL` for each one with `CalculatePriority(source, 0, 0)`
-- Only seeds if the frontier is empty (check `GetPendingURLs` count first)
+The crawler runs and reaches the crawl loop. It seeds BrainyQuote, pops it, fetches it, then fails because `ToscrapeParser` is the wrong parser. The URL gets marked `failed`, the queue empties, and the loop sleeps. Everything is working as expected — just missing the BrainyQuote parser.
 
-### 2. Wire frontier into `crawler.go`
-Replace the current hardcoded loop in `crawler.Run()` with:
+---
+
+## What's next
+
+### 1. Update the `Parser` interface (do this first)
+
+Current interface only returns quotes:
+```go
+type Parser interface {
+    Parse(html string) ([]models.Quote, error)
+}
 ```
-WarmSimhashCache → WarmFrontierCache → SeedFrontier (if empty) → pop loop
+
+Change it to return both quotes and discovered next URLs:
+```go
+type Result struct {
+    Quotes   []models.Quote
+    NextURLs []string
+}
+
+type Parser interface {
+    Parse(html string) (Result, error)
+}
 ```
-The pop loop: `PopURL` → fetch → parse → save quotes → push discovered URLs → mark done/failed
 
-### 3. BrainyQuote parser (`internal/parser/brainyquote.go`)
-First real source. Inspect `brainyquote.com/quotes` in the browser — look at:
-- Quote container selector
-- Author selector
-- Next page link selector (this is where dynamic next-page detection actually matters)
+Then update `ToscrapeParser` to match the new signature (it can return empty `NextURLs` for now since toscrape isn't a real source). Update the call site in `crawler.Run()` too.
 
-### 4. Quotable API fetcher (`internal/parser/quotable.go`)
-REST API, no HTML parsing needed. Endpoint: `https://api.quotable.io/quotes?page=1`
-Returns JSON — much simpler than HTML crawling.
+### 2. BrainyQuote parser (`internal/parser/brainyquote.go`)
+
+Before writing code:
+- Open `https://www.brainyquote.com/topics/inspirational-quotes` in browser
+- Right-click a quote → Inspect Element
+- Find selectors for:
+    - Quote container
+    - Quote text
+    - Author name
+    - Next page link (pagination)
+
+The parser should implement the new `Parser` interface — return both quotes and next-page URLs. For pages that look structurally different (topic page vs author page), handle that inside the parser itself.
+
+### 3. Wire parser dispatch in `Run()`
+
+`PopURL` currently returns only the URL string — but you need the source too to dispatch to the right parser. Two options:
+- Do a DB lookup by URL after `PopURL` to get the full `URLFrontier` row (simpler, slight overhead)
+- Change `PopURL` to return `(url, priority string, error)` or the full struct (requires storing source in Redis too)
+
+Recommended: DB lookup after `PopURL` for now. Add a `GetURLByURL(ctx, url) (models.URLFrontier, error)` function to `store.go`.
+
+Then in `Run()`:
+```go
+row, err := c.store.GetURLByURL(ctx, url)
+// ...
+switch row.Source {
+case "brainyquote":
+    result, err = (&parser.BrainyQuoteParser{}).Parse(html)
+default:
+    log.Printf("Unknown source: %s", row.Source)
+    _ = c.store.MarkURLFailed(ctx, url)
+    continue
+}
+```
+
+### 4. Push discovered URLs back into frontier
+
+After parsing, loop over `result.NextURLs`:
+```go
+for _, nextURL := range result.NextURLs {
+    priority := scoring.CalculatePriority(row.Source, row.Depth+1, 0)
+    frontier := models.URLFrontier{URL: nextURL, Source: row.Source, Priority: priority}
+    _, err := c.store.SaveURL(ctx, frontier)
+    // log error, continue
+    err = c.store.PushURL(ctx, nextURL, priority)
+    // log error, continue
+}
+```
+
+### 5. Save quotes from parse result
+
+Currently `Run()` discards the parse result entirely (`_, err = ...`). Wire in `store.SaveQuote` for each quote in `result.Quotes`.
 
 ---
 
 ## Key decisions made
 
-- **No Redis visited-URL set** — dedup handled by `UNIQUE` on `url_frontier.url` + `ON CONFLICT DO NOTHING`
-- **Postgres ENUM for status** — `crawl_status` type, not plain TEXT strings. Adding new statuses requires a migration.
-- **`scoring` is a separate package** — pure logic, no DB/Redis dependencies
-- **toscrape.com skipped** — sandbox only, not a real source. Dynamic next-page detection will be built for BrainyQuote instead.
+- **Parser returns both quotes and next URLs** — one `Parse` method, one `Result` struct, no split interface
+- **Source dispatch via switch** — clean, simple, no over-engineering
+- **DB lookup for source after PopURL** — Redis only stores URL + priority, source lives in Postgres
+- **No Quotable API** — service is permanently down, removed from sources
+- **toscrape.com** — sandbox only, keeping parser but not a real crawl target
 
 ---
 
-## Current migration state
+## File structure
 
 ```
-Applied At                  Migration
-=======================================
-Sun May 24 17:22:41 2026 -- 20260524170104_create_quotes.sql
-Sun May 24 17:47:11 2026 -- 20260524170105_create_url_frontier.sql
+cmd/
+└── crawler/
+        main.go              ← setup only, calls crawler.Run()
+internal/
+├── crawler/
+│       crawler.go           ← NEW: Crawler struct, Run(), SeedFrontier()
+├── db/
+│   │   store.go             ← added MarkURLInProgress
+│   └── migrations/
+├── parser/
+│       parser.go            ← Parser interface — needs update (see above)
+│       toscrape.go          ← needs update to new interface
+│       brainyquote.go       ← NEXT: to be created
+└── scoring/
+        scoring.go
 ```
+
+---
 
 ## Goose workflow reminder
 
 ```bash
-goose create <name> sql     # create new migration
-goose up                    # apply all pending
-goose down                  # roll back one
-goose status                # see what's applied
+goose create <name> sql
+goose up
+goose down
+goose status
 ```
 
-Env vars (set in your shell):
+Env vars:
 ```
 GOOSE_DRIVER=postgres
 GOOSE_DBSTRING=postgres://user:password@localhost:5432/quotes?sslmode=disable

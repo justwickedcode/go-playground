@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"quotes-crawler/internal/crawler"
+
 	"log"
 	"os"
 	"quotes-crawler/internal/db"
-	"quotes-crawler/internal/fetcher"
-	"quotes-crawler/internal/models"
-	"quotes-crawler/internal/parser"
+
 	"strconv"
 
 	"github.com/joho/godotenv"
@@ -48,45 +47,9 @@ func main() {
 	// store
 	store := db.NewStore(pool, redisClient)
 
-	if err := store.WarmSimhashCache(ctx); err != nil {
-		log.Fatal("Could not warm simhash cache: ", err)
+	c := crawler.New(store)
+
+	if err := c.Run(ctx); err != nil {
+		log.Fatal(err)
 	}
-	log.Println("Warmed simhash cache!")
-
-	// ---- fetch and parse ----
-	var allQuotes []models.Quote
-	for i := 1; i <= 10; i++ {
-		url := fmt.Sprintf("https://quotes.toscrape.com/page/%d/", i)
-		html, err := fetcher.Fetch(url)
-		if err != nil {
-			log.Printf("Could not fetch page %d: %v", i, err)
-			continue
-		}
-
-		quotes, err := (&parser.ToscrapeParser{}).Parse(html)
-		if err != nil {
-			log.Printf("Could not parse page %d: %v", i, err)
-			continue
-		}
-
-		allQuotes = append(allQuotes, quotes...)
-	}
-
-	// ---- save all ----
-	var saved, skipped, total int
-	for _, quote := range allQuotes {
-		total++
-		inserted, err := store.SaveQuote(ctx, quote)
-		if err != nil {
-			log.Printf("Could not save quote: %v", err)
-			continue
-		}
-		if inserted {
-			saved++
-		} else {
-			skipped++
-		}
-	}
-
-	log.Printf("Saved %d/%d quotes! (%d duplicates skipped)", saved, total, skipped)
 }

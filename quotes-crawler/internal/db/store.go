@@ -211,6 +211,18 @@ func (s *Store) MarkURLDone(ctx context.Context, url string) error {
 	return nil
 }
 
+func (s *Store) MarkURLInProgress(ctx context.Context, url string) error {
+	if url == "" {
+		return fmt.Errorf("URL is required")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE url_frontier SET status = 'in_progress' WHERE url = $1`,
+		url,
+	)
+	return err
+
+}
+
 func (s *Store) MarkURLFailed(ctx context.Context, url string) error {
 	if url == "" {
 		return fmt.Errorf("URL is required")
@@ -219,10 +231,7 @@ func (s *Store) MarkURLFailed(ctx context.Context, url string) error {
 		`UPDATE url_frontier SET status = 'failed', last_crawled_at=NOW(), error_count = error_count + 1 WHERE url = $1`,
 		url,
 	)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 func (s *Store) GetPendingURLs(ctx context.Context) ([]models.URLFrontier, error) {
