@@ -52,6 +52,45 @@ func (s *Store) WarmSimhashCache(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) WarmFrontierCache(ctx context.Context) error {
+	rows, err := s.pool.Query(ctx, `SELECT url, priority FROM url_frontier WHERE status = 'pending'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	pipe := s.rdb.Pipeline()
+	for rows.Next() {
+		var url string
+		var priority float64
+		if err := rows.Scan(&url, &priority); err != nil {
+			return err
+		}
+		pipe.ZAdd(ctx, "frontier", redis.Z{Score: priority, Member: url})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *Store) PushURL(ctx context.Context, url string, priority float64) error {
+	return s.rdb.ZAdd(ctx, "frontier", redis.Z{Score: priority, Member: url}).Err()
+}
+
+func (s *Store) PopURL(ctx context.Context) (string, error) {
+	results, err := s.rdb.ZPopMin(ctx, "frontier").Result()
+	if err != nil {
+		return "", err
+	}
+	if len(results) == 0 {
+		return "", nil
+	}
+	return results[0].Member.(string), nil
+}
+
 // isNearDuplicate checks LSH bands in Redis, runs Hamming only on candidates
 func (s *Store) isNearDuplicate(ctx context.Context, simhash int64) (bool, error) {
 	bands := dedup.ExtractBands(simhash)
@@ -130,4 +169,82 @@ func (s *Store) SaveQuote(ctx context.Context, quote models.Quote) (bool, error)
 	}
 
 	return true, s.addToSimhashCache(ctx, simhash)
+}
+
+func (s *Store) SaveURL(ctx context.Context, urlFrontier models.URLFrontier) (bool, error) {
+	if urlFrontier.URL == "" || urlFrontier.Source == "" {
+		return false, fmt.Errorf("URL and Source are required")
+	}
+
+	if urlFrontier.Priority < 0 {
+		return false, fmt.Errorf("priority must be >= 0")
+	}
+
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO url_frontier (url, source, priority, depth)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (url) DO NOTHING`,
+		urlFrontier.URL, urlFrontier.Source, urlFrontier.Priority, urlFrontier.Depth,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (s *Store) MarkURLDone(ctx context.Context, url string) error {
+	if url == "" {
+		return fmt.Errorf("URL is required")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE url_frontier SET status = 'done', last_crawled_at=NOW() WHERE url = $1`,
+		url,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) MarkURLFailed(ctx context.Context, url string) error {
+	if url == "" {
+		return fmt.Errorf("URL is required")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE url_frontier SET status = 'failed', last_crawled_at=NOW(), error_count = error_count + 1 WHERE url = $1`,
+		url,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) GetPendingURLs(ctx context.Context) ([]models.URLFrontier, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, url, source, priority, depth, status, error_count, last_crawled_at, created_at 
+		 FROM url_frontier WHERE status = 'pending' ORDER BY priority`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var urls []models.URLFrontier
+	for rows.Next() {
+		var u models.URLFrontier
+		if err := rows.Scan(
+			&u.ID, &u.URL, &u.Source, &u.Priority, &u.Depth,
+			&u.Status, &u.ErrorCount, &u.LastCrawledAt, &u.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		urls = append(urls, u)
+	}
+	return urls, rows.Err()
 }

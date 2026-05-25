@@ -27,10 +27,11 @@ A scalable web crawler that collects quotes from multiple sources and stores the
 cmd/
 ├── crawler/        → crawler binary
 internal/
-├── crawler/        → crawler.Run() orchestration (planned)
+├── crawler/        → crawler.Run() orchestration
 ├── fetcher/        → HTTP logic + rate limiting
 ├── parser/         → site-specific parsers (interface + implementations)
 ├── dedup/          → normalization, SHA256, simhash, hamming distance
+├── scoring/        → URL priority scoring
 └── db/             → postgres connection, migrations, storage
 ```
 
@@ -104,41 +105,91 @@ go test -v ./...            # verbose output
 go test -cover ./...        # with coverage
 ```
 
-## URL Frontier & Priority Queue
+## URL Frontier
 
-Instead of hardcoded page loops, the crawler will maintain a **URL frontier** — a priority queue of URLs waiting to be crawled. Pages are discovered dynamically during parsing and re-enqueued with a score.
+The crawler maintains a **URL frontier** — a persistent priority queue of URLs to crawl. PostgreSQL is the source of truth; Redis is the working queue.
+
+### url_frontier table
+
+```sql
+CREATE TYPE crawl_status AS ENUM ('pending', 'in_progress', 'done', 'failed');
+
+CREATE TABLE url_frontier (
+    id              BIGSERIAL PRIMARY KEY,
+    url             TEXT            NOT NULL UNIQUE,
+    source          TEXT            NOT NULL,
+    priority        FLOAT           NOT NULL,
+    depth           INT             NOT NULL DEFAULT 0,
+    status          crawl_status    NOT NULL DEFAULT 'pending',
+    error_count     INT             NOT NULL DEFAULT 0,
+    last_crawled_at TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_url_frontier_status_priority ON url_frontier(status, priority);
+```
+
+### Flow
 
 ```
-Seed URLs → [Redis Sorted Set] → Worker pulls lowest score URL → Fetch → Parse
-                 ↑                                                          |
-                 └──────────── new URLs enqueued with score ───────────────┘
-                                          +
-                                    quotes → DB
+Seed URLs → INSERT into url_frontier (status=pending)
+                ↓
+On startup  → load all pending rows → ZADD into Redis Sorted Set (score = priority)
+                ↓
+Fetcher workers → ZPOPMIN from Redis → fetch page → mark status=in_progress in DB
+                ↓
+Parser workers  → extract quotes + discover next-page URLs
+                ↓
+Quotes      → quotes table
+New URLs    → INSERT INTO url_frontier ON CONFLICT DO NOTHING + ZADD Redis
+                ↓
+Mark URL    → status=done or status=failed (increment error_count)
 ```
 
-### Scoring
+On Redis restart → reload all `status=pending` rows from DB back into Redis (same pattern as `WarmSimhashCache`).
+
+### Storage functions
+
+| Function | Status | Notes |
+|---|---|---|
+| `db.SaveURL` | ✅ Done | Insert with `ON CONFLICT (url) DO NOTHING` |
+| `db.MarkURLDone` | ✅ Done | Sets `status=done`, `last_crawled_at=NOW()` |
+| `db.MarkURLFailed` | ✅ Done | Sets `status=failed`, increments `error_count` |
+| `db.GetPendingURLs` | ✅ Done | Returns all pending rows ordered by priority |
+| `db.WarmFrontierCache` | ✅ Done | Loads pending URLs into Redis on startup |
+| `db.PushURL` | ✅ Done | `ZADD frontier <priority> <url>` |
+| `db.PopURL` | ✅ Done | `ZPOPMIN frontier` — returns next URL to crawl |
+
+### Priority Scoring (`internal/scoring`)
 
 Lower score = crawled sooner:
 
 ```
-score = source_base + (depth × depth_penalty) + (errors × error_penalty)
+score = source_base + (depth × DepthPenalty) + (error_count × ErrorPenalty)
 ```
 
-| Factor | Effect |
+| Constant | Value | Notes |
+|---|---|---|
+| `DepthPenalty` | 0.5 | Small nudge per page level |
+| `ErrorPenalty` | 3.0 | Significant penalty per past failure |
+| `DefaultSourceBase` | 1000.0 | Unknown sources go last |
+
+| Source | Base Score |
 |---|---|
-| Source priority | Base weight per domain (Quotable = 1, BrainyQuote = 5, Goodreads = 20) |
-| Crawl depth | Penalty per page level deeper |
-| Error rate | Penalty for past failures on this domain |
+| `scoring.SourceQuotable` | 1.0 |
+| `scoring.SourceBrainyQuote` | 5.0 |
+| `scoring.SourceGoodreads` | 20.0 |
 
 ### Redis primitives used
 
 | Structure | Purpose |
 |---|---|
 | `Sorted Set` — `frontier` | Priority queue (`ZADD` to push, `ZPOPMIN` to pull) |
-| `Set` — `visited` | Dedup visited URLs (`SADD`, `SISMEMBER`) |
 | `Set` — `simhash:band:*` | Near-duplicate quote detection via LSH |
 
-### Asynq weighted queues
+> **Note:** Visited URL dedup is handled by the `url_frontier` table itself via `UNIQUE` on `url` + `ON CONFLICT DO NOTHING`. No separate visited set needed.
+
+### Asynq weighted queues (planned)
 
 ```
 critical (weight 6) → high-yield, reliable sources (Quotable API)
@@ -152,21 +203,27 @@ low      (weight 1) → slow or unreliable sources (Goodreads)
 - ✅ Move crawler loop from `main.go` → `internal/crawler/crawler.go`
 - ✅ Add rate limiting to `fetcher` (configurable delay per domain)
 - ✅ Write tests for `dedup`, `parser`, `db`
-- [ ] Replace hardcoded page loop with dynamic next-page detection
+- [ ] Dynamic next-page detection in toscrape parser (skipped — toscrape not a target source)
 
-### Phase 2 — New Sources
+### Phase 2 — URL Frontier
+- ✅ Goose migration for `url_frontier` table (with `crawl_status` enum)
+- ✅ `db.SaveURL` / `db.MarkURLDone` / `db.MarkURLFailed` storage functions
+- ✅ `db.GetPendingURLs` — query pending URLs ordered by priority
+- ✅ `db.WarmFrontierCache` — load pending URLs from Postgres into Redis on startup
+- ✅ `db.PushURL` / `db.PopURL` — ZADD / ZPOPMIN wrappers
+- ✅ `scoring.CalculatePriority` — URL scoring function
+- [ ] Seed URLs inserted into frontier on first run
+- [ ] Wire frontier into `crawler.go`
+
+### Phase 3 — New Sources
 - [ ] Quotable API fetcher + parser (`internal/parser/quotable.go`)
 - [ ] BrainyQuote parser (`internal/parser/brainyquote.go`)
 - [ ] Wikiquote parser via MediaWiki API (`internal/parser/wikiquote.go`)
 - [ ] CSV importer for Kaggle dataset
 
-### Phase 3 — Queue & Infrastructure
-- [ ] Redis URL frontier using Sorted Set (`ZADD` / `ZPOPMIN`)
-- [ ] Visited URL set to prevent re-crawling
-- [ ] URL scoring system (source base + depth + error rate)
+### Phase 4 — Workers & Infrastructure
+- [ ] Fetcher workers consuming from Redis frontier
 - [ ] Asynq workers with weighted queues (critical / default / low)
-
-### Phase 4 — Robustness
 - [ ] Per-domain error tracking + automatic backoff
 - [ ] Retry logic in fetcher
 - [ ] Graceful shutdown (context cancellation)
